@@ -7,17 +7,13 @@ db.serialize(() => {
   db.run(`
     CREATE TABLE IF NOT EXISTS results (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-      operator TEXT NOT NULL,        -- Magnum / Toto / Damacai
-      draw_date TEXT NOT NULL,       -- YYYY-MM-DD (IMPORTANT)
-      
-      prize TEXT NOT NULL,           -- 1st / 2nd / 3rd / Special / Consolation
-      position INTEGER,              -- 1 / 2 / 3 (ONLY for top 3 prizes)
-
-      number TEXT NOT NULL,          -- 4-digit number
-
+      operator TEXT NOT NULL,
+      draw_date TEXT NOT NULL,
+      prize TEXT NOT NULL,
+      position INTEGER,
+      number TEXT NOT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
+    )
   `);
 
 });

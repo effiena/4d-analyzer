@@ -6,134 +6,155 @@ const db = require("./database");
 const app = express();
 app.use(cors());
 
-const delay = (ms) => new Promise(res => setTimeout(res, ms));
+const delay = (ms) => new Promise(r => setTimeout(r, ms));
 
 /**
  * =========================
- * SCRAPER (PRIZE AWARE)
+ * SCRAPER
  * =========================
  */
 app.get("/sync", async (req, res) => {
+
   let browser;
 
   try {
+
     browser = await puppeteer.launch({
       headless: "new"
     });
 
     const page = await browser.newPage();
 
-    const baseUrl = "https://4dlotto.my/past-results";
+    // last 26 days
+    const dates = Array.from({ length: 26 }, (_, i) => {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
 
-    console.log("Opening:", baseUrl);
-
-    await page.goto(baseUrl, {
-      waitUntil: "networkidle2"
+      return d.toISOString().split("T")[0];
     });
 
-    await delay(4000);
+    let all = [];
 
-    /**
-     * GET LINKS
-     */
-    const links = await page.evaluate(() => {
-      return Array.from(document.querySelectorAll("a"))
-        .map(a => a.href)
-        .filter(h => h.includes("past-results"));
-    });
+    for (const date of dates) {
 
-    console.log("FOUND LINKS:", links.length);
+      const url = `https://4dlotto.my/past-results/${date}`;
+      console.log("Opening:", url);
 
-    let allResults = [];
+      try {
 
-    /**
-     * LOOP PAGES
-     */
-    for (const link of links.slice(0, 6)) {
-      console.log("Scraping:", link);
-
-      await page.goto(link, {
-        waitUntil: "networkidle2"
-      });
-
-      await delay(3000);
-
-      /**
-       * PRIZE-AWARE SCRAPER
-       */
-      const results = await page.evaluate(() => {
-        const items = [];
-        let currentPrize = null;
-
-        const nodes = document.querySelectorAll("div, tr, li, span, p");
-
-        nodes.forEach(node => {
-          const text = node.innerText?.trim();
-
-          if (!text) return;
-
-          // detect prize
-          if (text.includes("1st")) currentPrize = "1st";
-          else if (text.includes("2nd")) currentPrize = "2nd";
-          else if (text.includes("3rd")) currentPrize = "3rd";
-
-          const matches = text.match(/\b\d{4}\b/g);
-
-          if (matches && currentPrize) {
-            matches.forEach(num => {
-              items.push({
-                number: num,
-                prize: currentPrize,
-                raw: text
-              });
-            });
-          }
+        await page.goto(url, {
+          waitUntil: "networkidle2",
+          timeout: 60000
         });
 
-        return items;
-      });
+        await delay(2000);
 
-      console.log("FOUND:", results.length);
+        const results = await page.evaluate((drawDate) => {
 
-      allResults = allResults.concat(results);
+          const items = [];
+          let currentPrize = null;
+
+          const nodes = document.querySelectorAll("div, tr, li, span, p");
+
+          nodes.forEach(n => {
+
+            const text = n.innerText?.trim();
+            if (!text) return;
+
+            // prize detection
+            if (text.includes("1st")) currentPrize = "1st";
+            else if (text.includes("2nd")) currentPrize = "2nd";
+            else if (text.includes("3rd")) currentPrize = "3rd";
+
+            // STRICT FILTER: remove years (IMPORTANT FIX)
+            const matches = text.match(/\b\d{4}\b/g)?.filter(num => {
+              const n = parseInt(num);
+
+              // remove years like 1900–2100
+              if (n >= 1900 && n <= 2100) return false;
+
+              return true;
+            });
+
+            if (matches && currentPrize) {
+
+              matches.forEach(num => {
+
+                items.push({
+                  operator: "Magnum",
+                  draw_date: drawDate,
+                  prize: currentPrize,
+                  position:
+                    currentPrize === "1st" ? 1 :
+                    currentPrize === "2nd" ? 2 :
+                    currentPrize === "3rd" ? 3 : null,
+                  number: num
+                });
+
+              });
+
+            }
+
+          });
+
+          return items;
+
+        }, date);
+
+        console.log(`FOUND ${results.length} for ${date}`);
+
+        all = all.concat(results);
+
+      } catch (e) {
+        console.log("SKIP:", date);
+      }
+
     }
 
     await browser.close();
 
-    console.log("TOTAL SCRAPED:", allResults.length);
+    console.log("TOTAL:", all.length);
 
-    /**
-     * SAVE TO DB
-     */
     let inserted = 0;
 
-    for (const item of allResults) {
+    for (const item of all) {
+
       await new Promise(resolve => {
+
         db.run(
-          `INSERT INTO results (draw, number, prize, draw_date)
-           VALUES (?, ?, ?, ?)`,
+          `INSERT INTO results (operator, draw_date, prize, position, number)
+           VALUES (?, ?, ?, ?, ?)`,
           [
-            "Magnum",
-            item.number,
+            item.operator,
+            item.draw_date,
             item.prize,
-            new Date().toISOString().split("T")[0]
+            item.position,
+            item.number
           ],
           (err) => {
-            if (!err) inserted++;
+
+            if (err) {
+              console.log("DB ERROR:", err.message);
+            } else {
+              inserted++;
+            }
+
             resolve();
+
           }
         );
+
       });
+
     }
 
     res.json({
       success: true,
-      total: allResults.length,
+      total: all.length,
       inserted
     });
 
   } catch (err) {
-    console.error(err);
 
     res.status(500).json({
       success: false,
@@ -141,30 +162,41 @@ app.get("/sync", async (req, res) => {
     });
 
   } finally {
+
     if (browser) await browser.close();
+
   }
+
 });
 
 /**
  * =========================
- * HISTORY API (FRONTEND USES THIS)
+ * HISTORY API
  * =========================
  */
 app.get("/history", (req, res) => {
+
   db.all(
-    `SELECT * FROM results ORDER BY created_at DESC`,
+    `SELECT * FROM results ORDER BY draw_date DESC, created_at DESC`,
     [],
     (err, rows) => {
+
       if (err) {
-        return res.json({
+        return res.status(500).json({
           success: false,
           error: err.message
         });
       }
 
-      res.json(rows);
+      res.json({
+        success: true,
+        count: rows.length,
+        data: rows
+      });
+
     }
   );
+
 });
 
 /**
